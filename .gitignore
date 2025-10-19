@@ -1,0 +1,11 @@
+# Ignore everything
+*
+
+# Allow directories so we can keep traversing
+!*/
+
+# Keep Python files
+!*.py
+
+# Keep this .gitignore file itself
+!.gitignore

@@ -1,114 +1,156 @@
-# play_caleuche.py
+#!/usr/bin/env python3
+"""
+test_caleuche_policy.py
+
+Run a deterministic rollout of your trained SAC policy on the Caleuche env.
+Assumes you saved:
+ - model at logs_caleuche/sac_caleuche_final (SB3 .zip)
+ - vecnormalize at logs_caleuche/vecnormalize.pkl (if used)
+
+Usage:
+    python3 test_caleuche_policy.py
+"""
+
 import os
 import time
-import argparse
 import numpy as np
-
+import torch
 import rclpy
-from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from stable_baselines3 import SAC
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize as VN
 from stable_baselines3.common.monitor import Monitor
 
-# Import your environment (file name must match)
+# --- Edit these if needed ---
+MODEL_PATH = "logs_caleuche/sac_caleuche_final"   # SB3 loads with or without .zip
+VECNORM_PATH = "logs_caleuche/vecnormalize.pkl"
+N_EPISODES = 5
+RENDER = True  # set False if running headless or you don't have a renderer
+DELAY_BETWEEN_STEPS = 0.0  # add small delay for visualization if needed (seconds)
+
+# --- Create ROS2 node (same as training) ---
 from caleuche_gym_env import CaleucheGymEnv, ROS2OdomNode
 
-def make_env(step_limit, odom_node):
+if not rclpy.ok():
+    rclpy.init()
+odom_node = ROS2OdomNode()
+
+# --- env factory (single env wrapped in DummyVecEnv) ---
+EPISODE_LENGTH = 150  # keep consistent with training if relevant
+
+def make_env():
     def _init():
-        env = CaleucheGymEnv(step_limit=step_limit, odom_node=odom_node)
-        env = Monitor(env)  # keep same wrappers as training if possible
+        env = CaleucheGymEnv(step_limit=EPISODE_LENGTH, odom_node=odom_node)
+        env = Monitor(env)  # monitor for compatibility with some wrappers/logging
         return env
     return _init
 
-def main():
-    parser = argparse.ArgumentParser(description="Play a trained PPO policy in Caleuche sim")
-    parser.add_argument("--model", default="logs_caleuche/ppo_caleuche_final.zip",
-                        help="Path to the saved PPO model (.zip or folder)")
-    parser.add_argument("--vec", default="logs_caleuche/vecnormalize.pkl",
-                        help="Path to VecNormalize pickle saved during training (optional)")
-    parser.add_argument("--episodes", type=int, default=10, help="Number of episodes to run")
-    parser.add_argument("--step_limit", type=int, default=200, help="Env step limit per episode (same as training)")
-    parser.add_argument("--render", action="store_true", help="Call env.render() each step if available")
-    parser.add_argument("--deterministic", action="store_true", help="Use deterministic actions")
-    parser.add_argument("--sleep", type=float, default=0.0, help="Seconds to sleep between env steps (0.0 for as-fast-as-possible)")
-    args = parser.parse_args()
+# Build a single-env DummyVecEnv (keeps same API you used for saving VecNormalize)
+eval_env = DummyVecEnv([make_env()])
 
-    # Init ROS2 (only if not already initialized)
-    if not rclpy.ok():
-        rclpy.init()
-    odom_node = ROS2OdomNode()
+# If VecNormalize stats exist, load them into the eval_env
+if os.path.exists(VECNORM_PATH):
+    try:
+        eval_env = VN.load(VECNORM_PATH, eval_env)
+        print(f"Loaded VecNormalize from {VECNORM_PATH}")
+    except Exception as e:
+        print("Failed to load VecNormalize:", e)
+        print("Proceeding without VecNormalize (this may change observations).")
 
-    # Create a DummyVecEnv with the same constructor signature used during training
-    base_env = DummyVecEnv([lambda: CaleucheGymEnv(step_limit=args.step_limit, odom_node=odom_node)])
+# --- device autodetect ---
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print("Using device:", device)
 
-    # Load VecNormalize if available (keeps observation normalization consistent)
-    env = base_env
-    if os.path.exists(args.vec):
-        try:
-            env = VecNormalize.load(args.vec, base_env)
-            # Use the VecNormalize in evaluation mode (no updating of running stats)
-            env.training = False
-            env.norm_reward = False
-            print(f"Loaded VecNormalize from: {args.vec}")
-        except Exception as e:
-            print("Failed to load VecNormalize, continuing with unnormalized env. Error:", e)
-            env = base_env
+# --- Load model ---
+if not os.path.exists(MODEL_PATH) and not os.path.exists(MODEL_PATH + ".zip"):
+    raise FileNotFoundError(f"Model not found at {MODEL_PATH}(.zip). Please check MODEL_PATH.")
+
+print("Loading model...")
+model = SAC.load(MODEL_PATH, env=eval_env, device=device)
+print("Model loaded. model.device =", model.device)
+
+# --- Helper: robust reset & step parsing for VecEnv / Gym / Gymnasium differences ---
+def safe_reset(env):
+    # VecEnv.reset() may return obs or (obs, info)
+    result = env.reset()
+    if isinstance(result, tuple) and len(result) == 2:
+        obs, info = result
     else:
-        print("VecNormalize file not found, using unnormalized env.")
+        obs, info = result, None
+    return obs, info
 
-    # Load model
-    if not os.path.exists(args.model) and not os.path.exists(args.model + ".zip"):
-        raise FileNotFoundError(f"Model not found: {args.model}")
-    print("Loading model:", args.model)
-    model = PPO.load(args.model, env=env)  # attaches env for convenience (not mandatory)
+def safe_step(env, action):
+    """
+    Handles both older gym step (obs, rew, done, info)
+    and gymnasium step (obs, rew, terminated, truncated, info),
+    and VecEnv batched returns.
+    """
+    result = env.step(action)
+    # result can be 4-tuple or 5-tuple (and batched arrays)
+    if len(result) == 5:
+        obs, rew, terminated, truncated, info = result
+        done = np.logical_or(terminated, truncated)
+    else:
+        obs, rew, done, info = result
+    return obs, rew, done, info
 
-    # Play episodes
-    episode_rewards = []
-    for ep in range(args.episodes):
-        obs = env.reset()
-        done = [False]  # VecEnv returns list-like done
+# --- Run evaluation episodes ---
+episode_rewards = []
+try:
+    for ep in range(N_EPISODES):
+        obs, _ = safe_reset(eval_env)
+        # For VecEnv the obs is typically batched (shape (1, ...))
+        done = np.zeros((eval_env.num_envs,), dtype=bool)
         ep_reward = 0.0
-        step = 0
+        step_i = 0
+        print(f"\nStarting episode {ep+1}/{N_EPISODES}")
         while not done[0]:
-            action, _states = model.predict(obs, deterministic=args.deterministic)
-            obs, rew, done, info = env.step(action)
-            # rew might be array-like (VecEnv) so coerce to float
-            ep_reward += float(rew[0]) if isinstance(rew, (list, tuple, np.ndarray)) else float(rew)
-            step += 1
+            # model.predict accepts batched obs for VecEnv
+            action, _ = model.predict(obs, deterministic=True)
+            obs, rew, done, info = safe_step(eval_env, action)
 
-            # optional rendering (if env implements render)
-            if args.render:
+            # rew may be batch-like; reduce to scalar for env 0
+            rew_arr = np.asarray(rew).reshape(-1)
+            ep_reward += float(rew_arr[0])
+
+            step_i += 1
+            if RENDER:
+                # call env.render() - your env may implement its own rendering
                 try:
-                    # if wrapped in VecNormalize / DummyVecEnv, call .render() on the inner env
-                    env.render()
+                    eval_env.render()
                 except Exception:
+                    # some VecEnvs require calling .render on the wrapped env:
                     try:
-                        base_env.render()
+                        eval_env.envs[0].render()
                     except Exception:
                         pass
 
-            if args.sleep > 0:
-                time.sleep(args.sleep)
+            if DELAY_BETWEEN_STEPS > 0:
+                time.sleep(DELAY_BETWEEN_STEPS)
 
-            # safety guard to prevent infinite loops in buggy envs
-            if step > args.step_limit + 50:
-                print("Reached step guard; breaking episode.")
+            # safety guard to prevent infinite loops
+            if step_i > (EPISODE_LENGTH + 1000):
+                print("Episode exceeded max steps, breaking.")
                 break
 
+        print(f"Episode {ep+1} reward: {ep_reward:.3f}  steps: {step_i}")
         episode_rewards.append(ep_reward)
-        print(f"Episode {ep+1}/{args.episodes} finished. Reward = {ep_reward:.3f} Steps = {step}")
 
-        # small pause between episodes so ROS/Sim can stabilize
-        time.sleep(0.5)
+except KeyboardInterrupt:
+    print("\nInterrupted by user (Ctrl+C). Exiting evaluation loop.")
 
-    print("All episodes finished. Rewards:", episode_rewards)
-
-    # Cleanup
+finally:
+    # cleanup ROS and envs
     try:
-        env.close()
-        base_env.close()
+        eval_env.close()
     except Exception:
         pass
-    print("Playback script finished.")
+    try:
+        odom_node.destroy_node()
+    except Exception:
+        pass
+    try:
+        rclpy.shutdown()
+    except Exception:
+        pass
 
-if __name__ == "__main__":
-    main()
+print("\nAll done. Eval rewards:", episode_rewards)

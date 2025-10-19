@@ -12,8 +12,13 @@ class WorldManager:
         self.world_service = '/world/task0/control'
         self.pose_service = '/world/task0/set_pose'
         self.node = transport.Node()
+        self.buoys = {
+            "mb_marker_buoy_red_in":  (-528.0, 176.0, 0.0),
+            "mb_marker_buoy_green_in":(-518.0, 176.0, 0.0),
+            "mb_marker_buoy_red_out": (-528.0, 196.0, 0.0),
+            "mb_marker_buoy_green_out":(-518.0, 196.0, 0.0),
+        }
 
-        
 
 
     def pause(self):
@@ -116,10 +121,63 @@ class WorldManager:
         return ok
    
 
+    def reset_buoys_simple(self, timeout=1000):
+        print("Resetting buoys to original positions...")
+        """
+        Simple reset: clear model velocities and teleport buoys to original SDF poses.
+        Mirrors the style of your existing model_reset for wamv.
+        """
+        # 1) Reset model poses (clear velocities)
+        wc_msg = WorldControl()
+        wc_msg.reset.model_only = True
+        ok, _ = self.node.request(
+            self.world_service,
+            wc_msg,
+            request_type=WorldControl,
+            response_type=Boolean,
+            timeout=timeout
+        )
+        print('Model poses reset:', ok)
+
+        # 2) Teleport buoys (original poses from your SDF)
+        buoys = {
+            "mb_marker_buoy_red_in":  (-528.0, 176.0, 0.0),
+            "mb_marker_buoy_green_in":(-518.0, 176.0, 0.0),
+            "mb_marker_buoy_red_out": (-528.0, 196.0, 0.0),
+            "mb_marker_buoy_green_out":(-518.0, 196.0, 0.0),
+        }
+
+        all_ok = True
+        for name, (x, y, z) in buoys.items():
+            pose = Pose()
+            pose.name = name
+            pose.position.x = float(x)
+            pose.position.y = float(y)
+            pose.position.z = float(z)
+            pose.orientation.x = 0.0
+            pose.orientation.y = 0.0
+            pose.orientation.z = 0.0
+            pose.orientation.w = 1.0
+
+            ok, _ = self.node.request(
+                self.pose_service,
+                pose,
+                request_type=Pose,
+                response_type=Boolean,
+                timeout=timeout
+            )
+            print(f'Teleport {name} to ({x}, {y}, {z}) ok={ok}')
+            all_ok = all_ok and bool(ok)
+
+        return all_ok
+
+
 
 if __name__ == "__main__":
 
     w = WorldManager()
+    w.unpause()
+    w.reset_buoys_simple()
     # Reset models and teleport WAM-V to default
     #w.model_reset()
     # Run 10 physics steps
