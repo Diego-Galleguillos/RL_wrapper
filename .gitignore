@@ -6,6 +6,7 @@
 
 # Keep Python files
 !*.py
+!*.md
 
 # Keep this .gitignore file itself
 !.gitignore
