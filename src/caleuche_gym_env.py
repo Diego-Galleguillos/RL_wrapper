@@ -191,7 +191,7 @@ class CaleucheGymEnv(gym.Env):
 
         # Starting position 2 (x, y, z, qx, qy, qz, qw)
         self.start_pose_2 = [
-            -518.822487364616,
+            -517.822487364616,
             164.19673333821746,
             -0.05557483609303693,
             -0.0020505951064116,
@@ -333,7 +333,7 @@ class CaleucheGymEnv(gym.Env):
 
         for buoy_name, (bx, by, bz) in self.wc.buoys.items():
             buoy_dist = np.sqrt((bx - self.odom_true[0])**2 + (by - self.odom_true[1])**2)
-            if buoy_dist < 1.5:
+            if buoy_dist < 2:
                 print(f"Collision with buoy {buoy_name} at distance {buoy_dist}")
                 self.goal_pose = self.goal_pose_1
                 return True, -500

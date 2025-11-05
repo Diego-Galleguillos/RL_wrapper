@@ -14,6 +14,7 @@ from rclpy.executors import SingleThreadedExecutor
 from std_msgs.msg import Float64
 from nav_msgs.msg import Odometry
 import math
+import random
 
 
 class ROS2OdomNode(Node):
@@ -79,10 +80,8 @@ class ROS2OdomNode(Node):
             pass
 
 
-
 class CaleucheGymEnv(gym.Env):
     """Gym environment for WAM-V using Gazebo & ROS2."""
-class CaleucheGymEnv(gym.Env):
     def __init__(self, step_limit=400, odom_node=None):
         super().__init__()
         if not rclpy.ok():
@@ -90,32 +89,73 @@ class CaleucheGymEnv(gym.Env):
         self.wc = WorldManager()
         # use the provided node, or create one if not given
         self.odom_node = odom_node if odom_node is not None else ROS2OdomNode()
+        self.odom_true = None
 
         self.done = False
         self.step_counter = 0
         self.step_limit = step_limit
         self.obs = None
 
-        # Goal pose (x, y, z, qx, qy, qz, qw)
-        self.goal_pose = [
-            -523.4477405710335,
-            174.86326544353705,
-            -0.10003555069266182,
-            -0.0013315821659977893,
-            -1.8278577294843213e-05,
-            0.47348236876522648,
-            0.8808022894062543
+        # Goals and start poses (copiados del ejemplo que diste)
+        self.goal_pose_1 = [
+            -522.1594574118119,
+            179.87699221714647,
+            -0.1630562136043632,
+            0.001752661253542435,
+            0.007011080777130351,
+            0.654090869747751,
+            0.7563814560375588
         ]
 
-        # Observation space: 13 odom values + 2 relative errors
+        self.goal_pose_2 = [
+            -522.3291315795685,
+            201.49660136429407,
+            -0.07870714343902278,
+            0.0020134109779915282,
+            0.007179225016119804,
+            0.6540433243041284,
+            0.7564203426915529
+        ]
+
+        self.start_pose_1 = [
+            -528.0274672293625,
+            164.6023061425605,
+            -0.04390476121577291,
+            -0.001500540377608551,
+            0.0021163920690534547,
+            0.5666785635027967,
+            0.8239348729903305
+        ]
+
+        self.start_pose_2 = [
+            -517.822487364616,
+            164.19673333821746,
+            -0.05557483609303693,
+            -0.0020505951064116,
+            0.0008396348797597133,
+            0.8268160950461664,
+            0.5624679857961581
+        ]
+
+        self.start_pose_3 = [
+            -521.9841173028476,
+            163.0002783474852,
+            -0.08069307057582592,
+            -0.0027935716308597714,
+            -0.001857133734800512,
+            0.7865821051099876,
+            0.6174765897850496
+        ]
+
+        self.goal_pose = self.goal_pose_1
+
+        # Observación simple: error_x, error_y, twist_x, twist_y, yaw, yaw_twist
         obs_low = np.full(6, -np.inf, dtype=np.float32)
         obs_high = np.full(6, np.inf, dtype=np.float32)
         self.observation_space = spaces.Box(low=obs_low, high=obs_high, dtype=np.float32)
 
-        # Action space: left/right thrusters [-100, 100]
-        self.action_space = spaces.Box(low=0, high=1.0, shape=(2,), dtype=np.float32)
-
-
+        # Action space: left/right thrusters [0, 1]
+        self.action_space = spaces.Box(low=0.0, high=1.0, shape=(2,), dtype=np.float32)
 
     def get_observation(self, timeout=2.0):
         start = time.time()
@@ -144,25 +184,46 @@ class CaleucheGymEnv(gym.Env):
         # Angular velocity around z
         yaw_twist = odom.twist.twist.angular.z
 
-        # Simplified observation
-        self.obs = [
-        error_x,
-        error_y,
-        twist_x,
-        twist_y,
-        yaw,
-        yaw_twist
+        # Save a fuller odom_true for buoy checks
+        self.odom_true = [
+            # Position
+            odom.pose.pose.position.x,
+            odom.pose.pose.position.y,
+            odom.pose.pose.position.z,
+            # Orientation
+            odom.pose.pose.orientation.x,
+            odom.pose.pose.orientation.y,
+            odom.pose.pose.orientation.z,
+            odom.pose.pose.orientation.w,
+            # Linear velocity
+            odom.twist.twist.linear.x,
+            odom.twist.twist.linear.y,
+            odom.twist.twist.linear.z,
+            # Angular velocity
+            odom.twist.twist.angular.x,
+            odom.twist.twist.angular.y,
+            odom.twist.twist.angular.z,
+            # Relative errors
+            error_x,
+            error_y
         ]
 
-        return self.obs
+        # Simplified observation vector
+        self.obs = np.array([
+            error_x,
+            error_y,
+            twist_x,
+            twist_y,
+            yaw,
+            yaw_twist
+        ], dtype=np.float32)
 
+        return self.obs
 
     def get_error(self):
         if self.obs is None:
             return 0.0, 0.0
-        return self.obs[0], self.obs[1]
-
-
+        return float(self.obs[0]), float(self.obs[1])
 
     def get_reward(self):
         """
@@ -177,8 +238,8 @@ class CaleucheGymEnv(gym.Env):
         # Reward is the reduction in distance
         reward = self.prev_dist - current_dist
 
-        # Optional: scale the reward
-        reward *= 20.0  # scale factor to increase magnitude
+        # scale factor to increase magnitude (kept similar to tu versión)
+        reward *= 20.0
 
         # Step penalty
         reward -= 0.1
@@ -186,19 +247,63 @@ class CaleucheGymEnv(gym.Env):
         # Update previous distance for next step
         self.prev_dist = current_dist
 
-        return reward
-
-
+        return float(reward)
 
     def check_done(self):
+        """
+        Returns: (terminated: bool, reward_extra: float)
+         - reward_extra: additional reward/penalty when specific events happen
+        """
+        if self.odom_true is None:
+            return False, 0.0
+
         error_x, error_y = self.get_error()
         dist = np.sqrt(error_x**2 + error_y**2)
-        return dist < 0.5 or self.step_counter >= self.step_limit
+        # If close to goal 1 -> switch to goal 2 and give small intermediate reward
+        if dist < 4 and self.goal_pose == self.goal_pose_1:
+            self.goal_pose = self.goal_pose_2
+            print("Reached Goal 1, switching to Goal 2")
+            # don't terminate the episode, give moderate reward to encourage reaching
+            return False, 500.0
+
+        # If close to goal 2 -> episode success (terminate) and give big reward
+        if dist < 4 and self.goal_pose == self.goal_pose_2:
+            self.goal_pose = self.goal_pose_1  # reset goal for next episodes
+            return True, 1500.0
+
+        # If step limit reached, reset goal and continue (handled by truncated in step)
+        if self.step_counter >= self.step_limit:
+            self.goal_pose = self.goal_pose_1
+
+        # Check buoy collisions (assumes self.wc.buoys exists and maps names->(x,y,z))
+        for buoy_name, (bx, by, bz) in getattr(self.wc, "buoys", {}).items():
+            buoy_dist = np.sqrt((bx - self.odom_true[0])**2 + (by - self.odom_true[1])**2)
+            if buoy_dist < 2.0:
+                # collision -> terminate and negative large penalty
+                self.goal_pose = self.goal_pose_1
+                return True, -500.0
+
+        if self.goal_pose == self.goal_pose_2:
+            try:
+                if self.odom_true[0] < -530.0 or self.odom_true[0] > -516.0:
+                    # out of bounds in x when going to goal 2
+                    self.goal_pose = self.goal_pose_1
+                    print("Out of bounds X when heading to Goal 2")
+                    return True, -100.0
+                else:
+                    print(self.odom_true[0])
+            except Exception:
+                print("Error checking out-of-bounds condition")
+        # default: not done
+        return dist < 3.5 or self.step_counter >= self.step_limit, 0.0
 
     def pass_action(self, action):
         # Update latest thrust values for publisher (agent can write faster than 10Hz)
-        self.odom_node.left_thrust = 100*float(np.clip(action[0], -1.0, 1.0))
-        self.odom_node.right_thrust = 100*float(np.clip(action[1], -1.0, 1.0))
+        # Use same scaling as tu segundo ejemplo: actions in [0,1] -> thrust 0..100
+        left = float(np.clip(action[0], 0.0, 1.0))
+        right = float(np.clip(action[1], 0.0, 1.0))
+        self.odom_node.left_thrust = 100.0 * left
+        self.odom_node.right_thrust = 100.0 * right
 
     def step(self, action):
         self.pass_action(action)
@@ -213,13 +318,19 @@ class CaleucheGymEnv(gym.Env):
 
         self.step_counter += 1
 
-        terminated = self.check_done()            # task-specific done
+        terminated, reward_extra = self.check_done()            # task-specific done + extra reward
         truncated = self.step_counter >= self.step_limit  # timeout
 
-        info = {}
-        print(reward, truncated, terminated, self.step_counter, self.step_limit, self.step_counter >= self.step_limit)
-        return obs, reward, terminated, truncated, info
+        # Combine rewards: base + event extra - 1 (same idea que tu snippet)
+        reward = reward + reward_extra - 1.0
 
+        info = {}
+        # optional debug print:
+        # print(f"step={self.step_counter} reward={reward} term={terminated} trunc={truncated}")
+
+        print(reward)
+
+        return obs, float(reward), bool(terminated), bool(truncated), info
 
     def reset(self, *, seed=None, options=None):
         """
@@ -232,15 +343,29 @@ class CaleucheGymEnv(gym.Env):
         """
         if seed is not None:
             np.random.seed(seed)
+            random.seed(seed)
 
         # Reset step counter and done flag
         self.step_counter = 0
         self.done = False
 
-        # Reset the model using your existing WorldControl + Pose services
-        self.wc.model_reset()  # optionally pass custom x,y,z,qx,qy,qz,qw
+        # Choose a random start pose among the provided ones
+        random_pose = random.choice([
+            self.start_pose_1,
+            self.start_pose_2,
+            self.start_pose_3
+        ])
 
-        # Optional: update number of steps and unpause simulator briefly
+        # Reset world & buoys
+        # note: model_reset signature assumed to accept the 7 pose args
+        self.wc.model_reset(*random_pose)
+        if hasattr(self.wc, "reset_buoys_simple"):
+            try:
+                self.wc.reset_buoys_simple()
+            except Exception:
+                pass
+
+        # ensure simulator steps a bit to apply reset
         self.wc.n_steps()
         self.wc.unpause()
 

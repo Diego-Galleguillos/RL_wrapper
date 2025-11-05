@@ -12,8 +12,13 @@ class WorldManager:
         self.world_service = '/world/task0/control'
         self.pose_service = '/world/task0/set_pose'
         self.node = transport.Node()
+        self.buoys = {
+            "mb_marker_buoy_red_in":  (-528.0, 176.0, 0.0),
+            "mb_marker_buoy_green_in":(-518.0, 176.0, 0.0),
+            "mb_marker_buoy_red_out": (-528.0, 196.0, 0.0),
+            "mb_marker_buoy_green_out":(-518.0, 196.0, 0.0),
+        }
 
-        
 
 
     def pause(self):
@@ -55,7 +60,7 @@ class WorldManager:
         )
         return ok
 
-    def n_steps(self, n=10):
+    def n_steps(self, n=25):
         """Run n discrete simulation steps."""
         self.pause()
         for _ in range(n):
@@ -114,7 +119,7 @@ class WorldManager:
         )
         print(f'Teleport wamv to ({x}, {y}, {z}) ok={ok}')
         return ok
-    
+   
 
     def reset_buoys_simple(self, timeout=1000):
         print("Resetting buoys to original positions...")
